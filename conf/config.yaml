@@ -1,0 +1,49 @@
+
+pde:
+  name    : "ac" # Default pde
+  files:
+    ac      : AC.mat
+    burgers : burgers_shock.mat
+
+rk_weights:
+  q_value : 0
+
+paths:
+  log : ./runs
+  data:
+    base_dir: ${hydra:runtime.cwd}/data
+    pdes: 
+      - name : PDEs
+        train: ${paths.data.base_dir}/PDES
+      - name : RK
+        weights: ${paths.data.base_dir}/IRK_weights/Butcher_IRK${rk_weights.q_value}.txt
+        
+
+data_path   : ${paths.data.pdes[0].train}/${pde.files[${pde.name}]}
+weight_path : ${paths.data.pdes[1].weights}
+
+params:
+  adam_epochs  : 10000   
+  lbfgs_epochs : 1000  # 50000 is too much
+  max_it       : 50000
+  max_eval     : 50000
+  learning_rate: 1e-02
+  layers       : [1, 2, 3]
+  batch_size   : 1
+
+
+adam_params:
+  epochs       : 10000
+  learning_rate: [1e-01, 1e-02, 1e-03, 1e-04, 1e-05]
+
+
+lbfgs_params:
+  epochs       : 100
+  max_iter     : 50000
+  max_eval     : 50000
+  learning_rate: [1.0, 1e-01, 1e-02, 1e-03]
+
+net:
+  input_size : [1, 2, 3]
+  hidden_size: [32, 64, 128, 256, 512]  
+  output_size: ${rk_weights.q_value}
