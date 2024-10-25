@@ -19,17 +19,22 @@ silu = nn.SiLU()
 
 
 class AntisymmetricRNN(nn.Module):
-    def __init__(self, layers, input_size, hidden_size, output_size, q,dt, rk_weights, eps=0.01, gamma=0.01, init_w_std=1, use_gates=False):
+    def __init__(self, layers, input_size, hidden_size, output_size, q,dt, rk_weights, eps=1, gamma=1, init_w_std=1, use_gates=False):
         super(AntisymmetricRNN, self).__init__()
 
+        feature_size = 128
         self.layers      = layers
 
-        normal_sample_V  = torch.distributions.Normal(torch.Tensor([0]), torch.Tensor([1/input_size]))
+        normal_sample_V  = torch.distributions.Normal(torch.Tensor([0]), torch.Tensor([1/feature_size]))
     
         Vh_init_weight   = nn.ParameterList([nn.Parameter(normal_sample_V.sample((hidden_size, input_size))[...,0]) if l < 1 else
                                     nn.Parameter(normal_sample_V.sample((hidden_size, hidden_size))[..., 0])  for l in range(layers)])
         Vh_init_bias     = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size)) for _ in range(layers)])
-        self.Vh          = nn.ParameterList([nn.Linear(input_size, hidden_size) for _ in range(layers)])
+        self.Vh          = nn.ParameterList([nn.Linear(feature_size, hidden_size) for _ in range(layers)])
+
+        #self.W_out = nn.Parameter(torch.randn(output_size, hidden_size) / np.sqrt(hidden_size))
+        self.W_out = nn.ParameterList( [nn.Parameter(torch.randn(hidden_size, hidden_size) / np.sqrt(hidden_size)) for _ in range(layers)] )
+        self.b_out = nn.Parameter(torch.zeros(hidden_size))
 
 
         if use_gates:
@@ -61,10 +66,14 @@ class AntisymmetricRNN(nn.Module):
         self.IRK_weights =  torch.tensor(np.reshape(tmp[0:q**2+q], (q+1,q)), dtype=torch.float32)    
         self.IRK_times = tmp[q**2+q:]
 
-        # fully connected layer
-        # self.fc1 = nn.Linear(hidden_size, hidden_size)
-        # self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, output_size)
+        # fully connected layer, fc_in1 can be used for feature expansion
+        self.fc_in = nn.Linear(input_size, feature_size)
+        self.fc_out = nn.Linear(hidden_size, output_size)
+
+        # Initialize loss balancing parameters
+        self.log_var_1 = nn.Parameter(torch.zeros(1))
+        self.log_var_2 = nn.Parameter(torch.zeros(1))
+        self.log_var_3 = nn.Parameter(torch.zeros(1))
 
 
     def forward(self, X_):
@@ -72,18 +81,25 @@ class AntisymmetricRNN(nn.Module):
 
         h = torch.zeros(X.shape[0], self.hidden_size)
 
+
         T = self.q
+        outputs = []
+        
+        # uniquely for feature expansion, can be removed
+        X = self.fc_in(X)
 
         if not self.use_gates:
             for _ in range(T):
                 for layer in range(self.layers):
                     WmWT_h = torch.matmul(h, (self.W[layer] - self.W[layer].transpose(1, 0) - self.gamma_I))
-                    # Vhx + bh
                     Vh_x = self.Vh[layer](X)
 
                     linear_transform = WmWT_h + Vh_x
+
                     f = torch.tanh(linear_transform) # torch.tanh
                     h = h + self.eps*f
+                outputs.append(h)
+         
                 
         else:
             for _ in range(T):
@@ -96,53 +112,44 @@ class AntisymmetricRNN(nn.Module):
                     
                     # Vzx + bz
                     Vz_x      = self.Vz[layer](X)
-                    
-                    # (W - W.T - gammaI)h + Vz_x 
                     linear_transform_2 = WmWT_h + Vz_x 
-                    
-                    # Tanh
                     f = torch.tanh(linear_transform_1) * torch.sigmoid(linear_transform_2)
-                    
-                    # output 
                     h = h + self.eps * f
+                outputs.append()
            
+        outputs = torch.stack(outputs)
+        output = self.fc_out(outputs[-1]) # 0.4078, 0.15
 
-        #print(f"H size {h.shape}")
-        #sys.exit()
-        #output = torch.tanh(self.fc1(h))
-        #output = torch.tanh(self.fc2(output))
-
-        #print(f"Output size: {output.shape}")
-        #sys.exit()
-        output = self.fc3(h)
         
         return output
+
+    def predict(self, test_set):
+        if type(test_set) != torch.Tensor:
+            test_set = torch.from_numpy(test_set).float()
+            
+        preds = self.forward(test_set)
+
+        return preds.detach().cpu().numpy()
+    
+
+
+class ACPDE(AntisymmetricRNN):
+    def __init__(self, layers, input_size, hidden_size, output_size, q, dt, rk_weights, eps=1, gamma=1, init_w_std=1, use_gates=False):
+        super(ACPDE, self).__init__(layers, input_size, hidden_size, output_size, q, dt, rk_weights, eps, gamma, init_w_std, use_gates)
+        
+    
 
     def fwd_gradients_ac(self, U, X):
         dumx0 = torch.ones([U.shape[0], U.shape[1]], requires_grad=True)
         first_deriv = torch.autograd.grad(U, X,
-                                          grad_outputs=dumx0, 
-                                          retain_graph=True,
-                                          create_graph=True)[0]
+                                            grad_outputs=dumx0, 
+                                            retain_graph=True,
+                                            create_graph=True)[0]
         
-        first_deriv_sum = torch.autograd.grad(first_deriv.sum(), 
+        sec_deriv_sum = torch.autograd.grad(first_deriv.sum(), 
                                             inputs=dumx0,
-                                           create_graph=True)[0]
-        return first_deriv_sum
-
-
-    def fwd_gradients_1(self, U, X):
-        dumx1 = torch.ones([U.shape[0], U.shape[1]], requires_grad=True)
-        first_deriv    = torch.autograd.grad(U, X,
-                                          grad_outputs = dumx1,
-                                          retain_graph=True,
-                                          create_graph=True,
-                                         )[0]
-        first_deriv_sum = torch.autograd.grad(outputs=first_deriv.sum(), 
-                                              inputs=dumx1,
-                                              create_graph=True)[0]
-
-        return first_deriv_sum
+                                            create_graph=True)[0]
+        return sec_deriv_sum
     
     def ac_eq(self, X_):
 
@@ -159,8 +166,40 @@ class AntisymmetricRNN(nn.Module):
         output= h_t1 - self.dt *(torch.matmul(pde, self.IRK_weights.T))
 
         return output, h_t1
-    
 
+
+    def compute_loss(self, y_train, x_train, bc_=None):
+        if bc_ is not None:
+            bc = bc_.detach().clone()
+            bc.requires_grad = True
+
+        pde_preds, _ = self.ac_eq(x_train)
+        bc_preds     = self.forward(bc)
+        bc_x         = self.fwd_gradients_ac(bc_preds, bc)
+
+        total_var = torch.exp(self.log_var_1) + torch.exp(self.log_var_2) + torch.exp(self.log_var_3)
+
+        weights1 = 3 * torch.exp(self.log_var_1) / total_var
+        weights2 = 2 * torch.exp(self.log_var_2) / total_var
+        weights3 = 2 * torch.exp(self.log_var_3) / total_var
+
+        loss1 = torch.sum((y_train - pde_preds)**2)
+        loss2 = torch.sum((bc_preds[0, :] - bc_preds[1, :])**2)
+        loss3 = torch.sum((bc_x[0,:] - bc_x[1,:])**2)
+        loss =  weights1 * loss1 + weights2 + \
+                loss2 + weights3 * loss3
+        
+        l2_reg = torch.tensor(0., requires_grad=True)
+        for param in self.parameters():
+            l2_reg = l2_reg + torch.norm(param)
+
+        return loss
+
+class BurgersPDE(AntisymmetricRNN):
+    def __init__(self, layers, input_size, hidden_size, output_size, q, dt, rk_weights, eps=1, gamma=1, init_w_std=1, use_gates=False):
+        super(BurgersPDE, self).__init__(layers, input_size, hidden_size, output_size, q, dt, rk_weights, eps, gamma, init_w_std, use_gates)
+        
+    
     def fwd_gradients_burger(self, U, x):
         dummy_var   = torch.ones([U.shape[0], U.shape[1]], requires_grad=True)
         first_deriv = torch.autograd.grad(U, x,
@@ -171,7 +210,7 @@ class AntisymmetricRNN(nn.Module):
                                             dummy_var,
                                             create_graph=True)[0]
         return second_deriv
-
+    
     
     def burger_eq(self, X_):
         nu    = 0.01/np.pi 
@@ -186,51 +225,27 @@ class AntisymmetricRNN(nn.Module):
         output= h_t1 - self.dt *(torch.matmul(pde, self.IRK_weights.T))
 
         return output, h_t1
-
-    def bc(self, X_):
-        X = X_.detach().clone()
-        X.requires_grad = True
-        h_t = self.forward(X)
-
-        h_tx  = self.fwd_gradients_1(h_t, X)
-        
-        return h_t, h_tx
     
-    def residual_loss(self):
-        pass
 
-    def predict(self, test_set):
-        if type(test_set) != torch.Tensor:
-            test_set = torch.from_numpy(test_set).float()
+    def compute_loss(self, y_train, x_train, bc_=None):
+        if bc_ is not None:
+            bc = bc_.detach().clone()
+            bc.requires_grad = True
 
-        data = test_set.clone().requires_grad_(True)
-            
-        preds = self.forward(data)
+        pde_preds, _ = self.burger_eq(x_train)
+        bc_preds     = self.forward(bc)
+        bc_preds_x   = self.fwd_gradients_burger(bc_preds, bc)
 
-        return preds.detach().cpu().numpy()
+        return (0.1 * torch.sum((y_train - pde_preds)**2)) + \
+               (0.1 * torch.sum((bc_preds)**2)) #+ (0.5 * torch.sum((bc_preds_x)**2))  
     
 
 
-class ACStrategy(AntisymmetricRNN):
-    def forward(self, model, x_train, bc):
-        pde_preds, _ = model.ac_eq(x_train)
-        bc_preds, bc_x = model.bc(bc)
-        return pde_preds, bc_preds, bc_x
 
-    def compute_loss(self, y_train, pde_preds, bc_preds, bc_x):
-        return torch.sum((y_train - pde_preds)**2) + \
-               torch.sum((bc_preds[0, :] - bc_preds[1, :])**2) + \
-               torch.sum((bc_x[0,:] - bc_x[1,:])**2)
-
-class BurgersStrategy(AntisymmetricRNN):
-    def forward(self, model, x_train, bc):
-        pde_preds, _ = model.burger_eq(x_train)
-        bc_preds, _ = model.bc(bc)
-        return pde_preds, bc_preds, None
-
-    def compute_loss(self, y_train, pde_preds, bc_preds, bc_x=None):
-        return torch.sum((y_train - pde_preds)**2) + \
-               torch.sum((bc_preds)**2) / torch.norm(y_train, p=2)
-    
-
-
+def get_PDE(pde_name, *args, **kwargs):
+    if pde_name == "ac":
+        return ACPDE(*args, **kwargs)
+    elif pde_name == "burgers":
+        return BurgersPDE(*args, **kwargs)
+    else:
+        raise ValueError(f"The PDE name: {pde_name} does not exist")

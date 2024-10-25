@@ -23,8 +23,6 @@ data_path   : ${paths.data.pdes[0].train}/${pde.files[${pde.name}]}
 weight_path : ${paths.data.pdes[1].weights}
 
 params:
-  adam_epochs  : 10000   
-  lbfgs_epochs : 1000  # 50000 is too much
   max_it       : 50000
   max_eval     : 50000
   learning_rate: 1e-02
@@ -38,7 +36,7 @@ adam_params:
 
 
 lbfgs_params:
-  epochs       : 100
+  epochs       : 10000
   max_iter     : 50000
   max_eval     : 50000
   learning_rate: [1.0, 1e-01, 1e-02, 1e-03]

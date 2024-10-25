@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import time 
 import scipy.io 
-from models.piarnn_model import AntisymmetricRNN
+from models.piarnn_model import AntisymmetricRNN, ACPDE, BurgersPDE, get_PDE
 from utilities.utils import load_data, apply_lower_triangular_mask, apply_upper_triangular_mask
 
 def set_seed(seed):
@@ -43,7 +43,7 @@ def main(cfg: DictConfig):
 
         # params
         layers      = cfg.params.layers[1]
-        adam_lr     = cfg.adam_params.learning_rate[1]
+        adam_lr     = cfg.adam_params.learning_rate[2]
         adam_epochs = cfg.adam_params.epochs
         lbfgs_epochs= cfg.lbfgs_params.epochs
         lbfg_lr     = cfg.lbfgs_params.learning_rate
@@ -52,11 +52,13 @@ def main(cfg: DictConfig):
 
 
         input_size  = cfg.net.input_size[0]
-        hidden_size = cfg.net.hidden_size[0]
+        hidden_size = cfg.net.hidden_size[1]
         output_size = cfg.net.output_size + 1
         q           = cfg.rk_weights.q_value
 
-        model = AntisymmetricRNN(layers, input_size, hidden_size, output_size, q,dt, rk_weights=rk_weights, use_gates=False)
+        model = get_PDE(cfg.pde.name, layers, input_size, hidden_size, output_size, q,dt, rk_weights=rk_weights, use_gates=False)
+        # print(f"model: {model}")
+        # sys.exit()
         optimizer = torch.optim.Adam(model.parameters(), lr=adam_lr)
         lbfgs_optimizer = torch.optim.LBFGS(
                   model.parameters(),
@@ -70,28 +72,16 @@ def main(cfg: DictConfig):
         
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4000, gamma=0.1)
 
+
         start_time = time.time()
         for epoch in tqdm(range(adam_epochs)): # num_epochs
             optimizer.zero_grad()
-
-            if cfg.pde.name == "ac":
-                pde_preds, _ = model.ac_eq(x_train)
-                bc_preds, bc_x  = model.bc(bc)
-
-                loss  =  torch.sum((y_train - pde_preds)**2)  +  torch.sum((bc_preds[0, :] - bc_preds[1, :])**2) +\
-                        torch.sum((bc_x[0,:] - bc_x[1,:])**2)
-                
-            elif cfg.pde.name == "burgers":
-                pde_preds, _ = model.burger_eq(x_train)
-                bc_preds, _  = model.bc(bc)
-                loss  = torch.sum((y_train - pde_preds)**2)  + torch.sum((bc_preds)**2) / torch.norm(y_train, p=2)
-            else:
-                raise ValueError(f"The PDE name: {cfg.pde.name} does not exit")
-
+            loss = model.compute_loss(y_train, x_train, bc)
             
             loss.backward()
             #nn.utils.clip_grad_norm_(model.parameters(), 1.5)
             apply_upper_triangular_mask(model.W)
+            #apply_lower_triangular_mask(model.W)
             
             optimizer.step()
             # scheduler.step()
@@ -153,9 +143,6 @@ def main(cfg: DictConfig):
     except KeyError as e:
         raise ValueError(f"Incorrect key error: {e}. Check the YAML configuration file.")
     
-# python train.py pde.name=ac rk_weights.q_value=4
-
-# Let's see if random is turned off: Error on the test sample: 0.11758829930657352
 
 if __name__ == "__main__":
     main()
